@@ -199,7 +199,7 @@
             loop: true,
             autoplay: {
                 delay: 2500,
-                disableOnInteraction: true,
+                disableOnInteraction: false,
                 pauseOnMouseEnter: true,
             },
             pagination: {
@@ -222,6 +222,14 @@
                     spaceBetween: 30,
                 },
             },
+        });
+
+        const swiperContainer = document.querySelector('.swiper');
+        swiperContainer.addEventListener('touchstart', () => {
+            swiper.autoplay.stop();
+        });
+        swiperContainer.addEventListener('touchend', () => {
+            swiper.autoplay.start();
         });
     </script>
 </body>
