@@ -78,7 +78,7 @@
   }
 
   #details-modal .modal-content {
-    max-height: 90vh;
+    max-height: calc(var(--vh, 1vh) * 90);
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -96,7 +96,7 @@
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: #16a34a #e5e7eb;
-    max-height: 60vh; /* Limit height on mobile */
+    max-height: calc(var(--vh, 1vh) * 60); /* Limit height on mobile */
   }
 
   #details-modal .modal-main::-webkit-scrollbar {
@@ -614,7 +614,7 @@
 
   .payhero-modal-content {
     background-color: #fff;
-    margin: 2vh auto;
+    margin: calc(var(--vh, 1vh) * 2) auto;
     padding: 0;
     border-radius: 12px;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
@@ -701,10 +701,19 @@
   @media (max-width: 768px) {
     .payhero-modal-content {
       width: 95% !important;
-      margin: 5vh auto;
+      margin: calc(var(--vh, 1vh) * 5) auto;
     }
   }
 </style>
+    <script>
+      function setVh() {
+        let vh = window.innerHeight * 0.01;
+        document.documentElement.style.setProperty('--vh', `${vh}px`);
+      }
+      window.addEventListener('resize', setVh);
+      window.addEventListener('load', setVh);
+      setVh();
+    </script>
 </head>
 <body class="bg-gray-100">
   <div id="urgent-message" class="fixed top-0 left-0 right-0 text-white p-4 z-50 hidden">
@@ -1095,7 +1104,7 @@
 
   <!-- NOWPayments Modal -->
   <div id="nowpayments-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden px-4 py-6">
-    <div class="bg-white rounded-lg p-5 sm:p-6 w-full max-w-md shadow-xl transform transition-all" style="max-height: 90vh; overflow-y: auto;">
+    <div class="bg-white rounded-lg p-5 sm:p-6 w-full max-w-md shadow-xl transform transition-all" style="max-height: calc(var(--vh, 1vh) * 90); overflow-y: auto;">
       <h3 id="nowpayments-title" class="text-xl sm:text-2xl font-bold text-gray-800 mb-4 text-center">Pay with Cryptocurrency</h3>
       <p id="nowpayments-product-name" class="text-gray-600 text-sm mb-1 text-center"></p>
       <p id="nowpayments-amount-usd" class="text-green-600 font-semibold mb-5 text-center"></p>
@@ -1222,7 +1231,7 @@
   </div>
 
   <div id="static-page-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
-    <div class="bg-white rounded-lg p-6 max-w-2xl w-full relative max-h-[80vh] overflow-y-auto">
+    <div class="bg-white rounded-lg p-6 max-w-2xl w-full relative overflow-y-auto" style="max-height: calc(var(--vh, 1vh) * 80);">
       <button id="static-page-close" class="absolute top-4 right-4 text-gray-500 hover:text-gray-700">
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
