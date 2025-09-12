@@ -284,8 +284,17 @@
   </style>
 </head>
 <body class="bg-gray-100">
+  <script>
+    function setVh() {
+      let vh = window.innerHeight * 0.01;
+      document.documentElement.style.setProperty('--vh', `${vh}px`);
+    }
+    window.addEventListener('resize', setVh);
+    window.addEventListener('load', setVh);
+    setVh();
+  </script>
   <!-- Login Page -->
-  <div id="login-page" class="flex items-center justify-center min-h-screen">
+  <div id="login-page" class="flex items-center justify-center min-h-screen" style="min-height: calc(var(--vh, 1vh) * 100);">
     <div class="bg-white rounded-lg shadow-md p-8 max-w-sm w-full">
       <h2 class="text-2xl font-semibold text-gray-900 mb-6 text-center">Admin Login</h2>
       <div class="mb-4">

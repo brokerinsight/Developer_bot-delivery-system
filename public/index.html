@@ -32,8 +32,17 @@
             box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
         }
     </style>
+    <script>
+      function setVh() {
+        let vh = window.innerHeight * 0.01;
+        document.documentElement.style.setProperty('--vh', `${vh}px`);
+      }
+      window.addEventListener('resize', setVh);
+      window.addEventListener('load', setVh);
+      setVh();
+    </script>
 </head>
-<body class="min-h-screen flex items-center justify-center p-4 bg-cover bg-center" style="background-image: url('https://images.unsplash.com/photo-1611605698335-8b1569810432?ixlib=rb-1.2.1&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1470&q=80');">
+<body class="min-h-screen flex items-center justify-center p-4 bg-cover bg-center" style="background-image: url('https://images.unsplash.com/photo-1611605698335-8b1569810432?ixlib=rb-1.2.1&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=1470&q=80'); height: 100vh; height: calc(var(--vh, 1vh) * 100);">
     <main class="glass-container text-white p-8 sm:p-12 max-w-4xl mx-auto text-center">
         <h1 class="text-4xl sm:text-6xl font-bold mb-4">Enhance Your Trading with Automation</h1>
         <p class="text-lg sm:text-xl mb-8">Discover a world of powerful and reliable trading automation tools. Your path to smarter trading starts here.</p>
