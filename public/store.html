@@ -2718,17 +2718,28 @@ function handleCustomBotNowPaymentsStatus(orderId) {
               }
             } else if (data.status && data.status.startsWith('failed_')) {
                 clearInterval(countdown);
-                // The `data.message` from the server now contains the descriptive error from PayHero.
-                // Display this reason clearly to the user.
-                statusMessage.innerHTML = `<strong>Payment Failed.</strong><br>${data.message || 'An unknown error occurred.'} You can <a href="${WHATSAPP_REDIRECT}" class="text-green-600 underline">contact support</a> if the issue persists.`;
+                statusMessage.innerHTML = `${data.message || `Payment failed: ${data.status}`}. You can <a href="${WHATSAPP_REDIRECT}" class="text-green-600 underline">contact support</a> if the issue persists.`;
 
-                // Since we removed specific failure statuses from the backend, the complex retry logic is no longer needed.
-                // We will simply close the modal after a delay to allow the user to read the message.
-                setTimeout(() => {
-                    modal.classList.add('hidden');
-                    document.body.classList.remove('popup-active');
-                    clearPaymentCookie(product.item);
-                }, 8000); // 8 seconds to read the message.
+                // More specific retry logic for STK failures
+                const retryableStkFailures = ['failed_stk_timeout', 'failed_stk_initiation'];
+                // failed_stk_cb_ might also be retryable if it was a temporary PayHero issue
+                // but cancelled_by_user, insufficient_funds, invalid_pin are usually not directly retryable by simply re-polling.
+
+                if (showRetry && retryCount < maxRetries &&
+                    (retryableStkFailures.includes(data.status) || data.status.startsWith('failed_stk_cb_'))) {
+                    retryBtn.classList.remove('hidden');
+                    retryBtn.textContent = 'Retry Payment';
+                    retryBtn.onclick = () => {
+                        retryCount++;
+                        modal.classList.add('hidden'); document.body.classList.remove('popup-active');
+                        // For STK, retrying means showing the PayHero modal again.
+                        // We need product details and original KES price.
+                        const originalKesPrice = localStorage.getItem(`payment_${product.item}_kesPrice`) || (product.price * (exchangeRate || settings.fallbackRate || 130)).toFixed(2);
+                        showPayHeroModal(product, originalKesPrice);
+                    };
+                } else {
+                    setTimeout(() => { modal.classList.add('hidden'); document.body.classList.remove('popup-active'); clearPaymentCookie(product.item); }, 7000); // Longer for failure messages
+                }
             } else if (data.status === 'no payment' || data.status === 'partial payment') { // Manual Mpesa specific
               clearInterval(countdown);
               statusMessage.innerHTML = `${data.message || 'There was an issue with your manual payment.'} Please <a href="${WHATSAPP_REDIRECT}" class="text-green-600 underline">contact support</a>.`;
@@ -4058,6 +4069,7 @@ function handleCustomBotNowPaymentsStatus(orderId) {
         const retryBtn = document.getElementById('status-retry');
 
         statusMessage.innerHTML = 'STK Push sent. Please check your phone and enter your M-PESA PIN to complete the payment.';
+        statusMessage.style.color = 'inherit'; // Reset color
         retryBtn.classList.add('hidden');
         modal.classList.remove('hidden');
         document.body.classList.add('popup-active');
@@ -4069,13 +4081,10 @@ function handleCustomBotNowPaymentsStatus(orderId) {
             if (timeLeft <= 0) {
                 clearInterval(countdownTimerId);
                 if(pollIntervalId) clearInterval(pollIntervalId);
-                statusMessage.innerHTML = 'Payment timed out. Please try again.';
-                fetch(`/api/custom-bot/order/${refCode}`, { method: 'DELETE' });
-                setTimeout(() => {
-                    modal.classList.add('hidden');
-                    document.body.classList.remove('popup-active');
-                }, 3000);
-                return;
+                statusMessage.innerHTML = 'Payment timed out. If you completed the payment, please contact support. Otherwise, you can close this and try again.';
+                statusMessage.style.color = 'orange';
+                // No need to try and delete anything, the cron job will handle cleanup.
+                return; // Stop the countdown but leave the modal open for the user to read.
             }
 
             const minutes = Math.floor(timeLeft / 60);
@@ -4089,26 +4098,26 @@ function handleCustomBotNowPaymentsStatus(orderId) {
         pollIntervalId = setInterval(async () => {
             try {
                 const res = await fetch(`/api/custom-bot/payhero-status/${refCode}`);
+                const data = await res.json(); // Always parse JSON to get the message
+
                 if (!res.ok) {
                     if (res.status === 404) {
-                         // Order not found, maybe it timed out and was deleted by another process.
                          clearInterval(countdownTimerId);
                          clearInterval(pollIntervalId);
-                         statusMessage.innerHTML = 'Order timed out or was cancelled.';
+                         statusMessage.innerHTML = data.message || 'Order not found. It may have expired. Please try again.';
+                         statusMessage.style.color = 'red';
                          setTimeout(() => {
                             modal.classList.add('hidden');
                             document.body.classList.remove('popup-active');
-                         }, 3000);
+                         }, 5000);
                     }
-                    // For other errors, just log and continue polling
                     console.warn(`PayHero status poll failed with status: ${res.status}`);
                     return;
                 }
-                const data = await res.json();
 
                 if (data.success) {
                     // Always update the status message with the one from the server
-                    statusMessage.innerHTML = data.message || `Status: ${data.status}`;
+                    statusMessage.innerHTML = data.message;
 
                     if (data.status === 'paid') {
                         clearInterval(countdownTimerId);
@@ -4119,21 +4128,22 @@ function handleCustomBotNowPaymentsStatus(orderId) {
                             document.body.classList.remove('popup-active');
                             showCustomBotSuccess(data.trackingNumber, '', 'tracking');
                         }, 2000);
-                    } else if (data.status && data.status.startsWith('failed')) {
+                    } else if (data.status === 'failed') {
                         clearInterval(countdownTimerId);
                         clearInterval(pollIntervalId);
                         statusMessage.style.color = 'red';
-                        // The message is already set above, so we just need to handle the modal closing
+                        // The message is already set, just leave the modal open longer for the user to read.
                         setTimeout(() => {
                             modal.classList.add('hidden');
                             document.body.classList.remove('popup-active');
-                        }, 8000); // Longer timeout for failure messages
+                        }, 8000);
                     }
-                    // If status is 'pending_stk_push', the loop will continue
+                    // If status is 'pending' or 'pending_stk_push', the loop will continue
+                    // and the message will be updated with the latest from the server.
                 }
             } catch (error) {
                 console.error('Error polling PayHero status:', error);
-                // Don't stop polling on a single network error, it might be transient
+                // Don't stop polling on a single network error
             }
         }, 5000); // Poll every 5 seconds
     }
