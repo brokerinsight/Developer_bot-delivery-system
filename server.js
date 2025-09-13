@@ -1585,13 +1585,10 @@ app.post('/api/payhero-callback', async (req, res) => {
       } else {
         // Payment failed
         console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot payment FAILED for ref ${refCode}. ResultCode: ${ResultCode}, Desc: ${ResultDesc}`);
-        const { data: order } = await supabase.from('custom_bot_orders').select('*').eq('ref_code', refCode).single();
-        if (order) {
-          await supabase
-            .from('custom_bot_orders')
-            .update({ payment_status: 'failed', status: 'failed', updated_at: new Date().toISOString() })
-            .eq('ref_code', refCode);
-        }
+        const failureReason = ResultDesc || 'Payment failed with an unknown error from the provider.';
+
+        // Use the new helper to move the failed order from Redis to the DB
+        await moveAndFailCustomBotOrderFromCache(refCode, failureReason);
       }
       // Respond to PayHero for custom bot flow
       return res.status(200).json({ success: true, message: "Callback processed for custom bot order." });
@@ -2635,38 +2632,59 @@ app.get('/api/custom-bot/payhero-status/:refCode', async (req, res) => {
   try {
     const { refCode } = req.params;
 
-    // Check Redis first for a pending order
-    let order = await redisClient.get(`custom_bot_order:${refCode}`);
-    if (order) {
-        // Order is still pending in cache, not yet confirmed by callback
-        return res.json({ success: true, status: 'pending_stk_push' });
+    // Check Redis first for a pending order that hasn't hit the callback yet
+    const cachedOrder = await redisClient.get(`custom_bot_order:${refCode}`);
+    if (cachedOrder) {
+        // This is the "happy path" while waiting for the STK push.
+        return res.json({
+            success: true,
+            status: 'pending_stk_push', // A consistent status for the frontend
+            message: 'STK Push sent. Please check your phone and enter your M-PESA PIN to complete the payment.'
+        });
     }
 
     // If not in Redis, check the database for a confirmed or failed order
     const { data: dbOrder, error: dbError } = await supabase
         .from('custom_bot_orders')
-        .select('payment_status, tracking_number')
+        .select('payment_status, tracking_number') // Select the fields we need
         .eq('ref_code', refCode)
         .single();
 
     if (dbError && dbError.code !== 'PGRST116') {
-        console.error(`[${new Date().toISOString()}] DB error fetching payhero status for ${refCode}:`, dbError);
+        console.error(`[${new Date().toISOString()}] DB error fetching custom bot payhero status for ${refCode}:`, dbError);
         return res.status(500).json({ success: false, error: 'Database error.' });
     }
 
     if (!dbOrder) {
-        return res.status(404).json({ success: false, error: 'Order not found or has timed out and been removed.' });
+        return res.status(404).json({ success: false, status: 'expired', message: 'Order not found. It may have expired. Please try again.' });
     }
 
-    // Order found in DB, return its status and tracking number
+    // Construct a user-friendly message based on the DB status
+    let message = 'Checking status...';
+    const paymentStatus = dbOrder.payment_status;
+
+    if (paymentStatus === 'paid') {
+        message = 'Payment successful! Your custom bot order is being processed.';
+    } else if (paymentStatus && paymentStatus.startsWith('failed:')) {
+        // Extract the reason from "failed: The reason text"
+        const reason = paymentStatus.substring('failed:'.length).trim();
+        message = `Payment failed: ${reason}`;
+    } else if (paymentStatus === 'pending') {
+        message = 'Payment is pending verification.';
+    } else {
+        // Fallback for any other status (e.g., if it's just 'failed' without a reason)
+        message = `Order status: ${paymentStatus}`;
+    }
+
     res.json({
         success: true,
-        status: dbOrder.payment_status,
-        trackingNumber: dbOrder.tracking_number
+        status: dbOrder.payment_status, // Send the raw status for the frontend
+        trackingNumber: dbOrder.tracking_number,
+        message: message // Send the user-friendly message
     });
 
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error in payhero-status check:`, error.message);
+    console.error(`[${new Date().toISOString()}] Error in custom bot payhero-status check:`, error.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
@@ -3107,6 +3125,53 @@ initialize().catch(error => {
   console.error(`[${new Date().toISOString()}] Server initialization failed:`, error.message);
   process.exit(1);
 });
+
+// Helper function to move a FAILED cached order from Redis to the database
+async function moveAndFailCustomBotOrderFromCache(refCode, failureReason) {
+  try {
+    const cachedOrderStr = await redisClient.get(`custom_bot_order:${refCode}`);
+    if (!cachedOrderStr) {
+      console.warn(`[${new Date().toISOString()}] No cached order found in Redis to fail for ref code: ${refCode}. It might have already been processed or expired.`);
+      return null;
+    }
+
+    const cachedOrder = JSON.parse(cachedOrderStr);
+
+    const trackingNumber = `CB-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
+
+    const dbOrderData = {
+      ...cachedOrder,
+      tracking_number: trackingNumber,
+      status: 'failed', // Main order status
+      payment_status: `failed: ${failureReason}`, // Detailed payment status
+      created_at: cachedOrder.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    const { data: insertedOrder, error: insertError } = await supabase
+      .from('custom_bot_orders')
+      .insert([dbOrderData])
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error(`[${new Date().toISOString()}] Error moving FAILED cached order to database:`, insertError);
+      // Don't delete from Redis if DB insert fails, to allow for potential retry
+      return null;
+    }
+
+    // On successful insert, remove from Redis cache
+    await redisClient.del(`custom_bot_order:${refCode}`);
+    console.log(`[${new Date().toISOString()}] Moved FAILED cached order to database with tracking number: ${trackingNumber}`);
+
+    // Not sending a failure email to the user automatically to avoid spam. Admin can review.
+
+    return insertedOrder;
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Error in moveAndFailCustomBotOrderFromCache:`, error.message);
+    return null;
+  }
+}
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {

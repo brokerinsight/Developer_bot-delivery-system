@@ -4107,23 +4107,29 @@ function handleCustomBotNowPaymentsStatus(orderId) {
                 const data = await res.json();
 
                 if (data.success) {
+                    // Always update the status message with the one from the server
+                    statusMessage.innerHTML = data.message || `Status: ${data.status}`;
+
                     if (data.status === 'paid') {
                         clearInterval(countdownTimerId);
                         clearInterval(pollIntervalId);
-                        modal.classList.add('hidden');
-                        document.body.classList.remove('popup-active');
-                        // We don't have the email here, but the tracking number is most important for the success message
-                        showCustomBotSuccess(data.trackingNumber, '', 'tracking');
-                    } else if (data.status && data.status.startsWith('failed')) {
-                        clearInterval(countdownTimerId);
-                        clearInterval(pollIntervalId);
-                        statusMessage.innerHTML = `Payment failed. Please try again or contact support. (Reason: ${data.status})`;
+                        statusMessage.style.color = 'green';
                         setTimeout(() => {
                             modal.classList.add('hidden');
                             document.body.classList.remove('popup-active');
-                        }, 4000);
+                            showCustomBotSuccess(data.trackingNumber, '', 'tracking');
+                        }, 2000);
+                    } else if (data.status && data.status.startsWith('failed')) {
+                        clearInterval(countdownTimerId);
+                        clearInterval(pollIntervalId);
+                        statusMessage.style.color = 'red';
+                        // The message is already set above, so we just need to handle the modal closing
+                        setTimeout(() => {
+                            modal.classList.add('hidden');
+                            document.body.classList.remove('popup-active');
+                        }, 8000); // Longer timeout for failure messages
                     }
-                    // If status is 'pending_stk_push', do nothing and let it continue polling.
+                    // If status is 'pending_stk_push', the loop will continue
                 }
             } catch (error) {
                 console.error('Error polling PayHero status:', error);
