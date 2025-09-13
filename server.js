@@ -1471,7 +1471,8 @@ app.post('/api/initiate-server-stk-push', rateLimit, async (req, res) => {
       amount: amountToCharge,
       phone_number: normalizedPhone,
       channel_id: parseInt(payheroChannelId),
-      provider: "m-pesa",
+      provider: "sasapay",
+      network_code: "63902",
       external_reference: serverSideReference,
       customer_name: customerName || 'Valued Customer',
       callback_url: callbackUrl
@@ -1521,83 +1522,84 @@ app.post('/api/initiate-server-stk-push', rateLimit, async (req, res) => {
 
 app.post('/api/payhero-callback', async (req, res) => {
   try {
-    // 1. Common parsing logic for the callback body
     if (!req.body || typeof req.body !== 'object') {
-        console.error(`[${new Date().toISOString()}] PayHero CB: Received empty or invalid body:`, req.body);
-        return res.status(400).json({ error: 'Invalid callback body from PayHero' });
+        console.error(`[${new Date().toISOString()}] PayHero CB: Received empty or invalid body.`);
+        return res.status(400).json({ error: 'Invalid callback body' });
     }
+
     const { response: payheroResponseData, status: overallCallbackStatus } = req.body;
+
     if (!payheroResponseData || typeof payheroResponseData !== 'object') {
-        console.error(`[${new Date().toISOString()}] PayHero CB: Invalid or missing 'response' object in callback. Body:`, req.body);
-        return res.status(400).json({ error: 'Invalid callback structure from PayHero: missing response object' });
+        console.error(`[${new Date().toISOString()}] PayHero CB: Invalid or missing 'response' object.`);
+        return res.status(400).json({ error: 'Invalid callback structure' });
     }
+
     const { ExternalReference, ResultCode, ResultDesc, Status: paymentGatewayStatus, MpesaReceiptNumber, Amount, Phone: PayerPhone } = payheroResponseData;
+
     if (!ExternalReference) {
-        console.error(`[${new Date().toISOString()}] PayHero CB: Missing ExternalReference. Body:`, req.body);
-        return res.status(400).json({ error: 'Missing ExternalReference in PayHero callback' });
+      console.error(`[${new Date().toISOString()}] PayHero CB: Missing ExternalReference.`);
+      return res.status(400).json({ error: 'Missing ExternalReference' });
     }
 
-    const refCode = ExternalReference;
+    const serverSideReference = ExternalReference;
+    const isCustomBotOrder = serverSideReference.startsWith('CB-');
 
-    // 2. Decision based on reference prefix
-    if (refCode.startsWith('CB-')) {
-      // --- CUSTOM BOT ORDER LOGIC ---
-      console.log(`[${new Date().toISOString()}] PayHero CB: Processing Custom Bot Order for ref ${refCode}`);
+    console.log(`[${new Date().toISOString()}] PayHero CB received for ${serverSideReference}. Is Custom Bot: ${isCustomBotOrder}`);
 
-      if (overallCallbackStatus === true && ResultCode === 0 && paymentGatewayStatus === "Success") {
-        console.log(`[${new Date().toISOString()}] PayHero CB: Payment SUCCEEDED for Custom Bot ref ${refCode}.`);
-        const movedOrder = await moveCustomBotOrderFromCache(refCode);
+    if (isCustomBotOrder) {
+      // --- Handle Custom Bot Order Callback ---
+      const { data: customOrder, error: customOrderError } = await supabase
+        .from('custom_bot_orders')
+        .select('*')
+        .eq('ref_code', serverSideReference)
+        .single();
 
-        if (movedOrder) {
-          // Order was in cache and is now in DB. Update it with the receipt number.
-          if (MpesaReceiptNumber) {
-            await supabase
-              .from('custom_bot_orders')
-              .update({ mpesa_receipt_number: MpesaReceiptNumber, updated_at: new Date().toISOString() })
-              .eq('ref_code', refCode);
-          }
-          console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot payment SUCCESS for cached order: ${refCode}`);
-        } else {
-          // Order was not in cache, must be in DB already. Update its status.
-          const { data: order, error: orderError } = await supabase
-            .from('custom_bot_orders')
-            .select('*')
-            .eq('ref_code', refCode)
-            .single();
-
-          if (orderError || !order) {
-            console.error(`[${new Date().toISOString()}] PayHero CB: Custom bot order not found in DB for callback: ${refCode}`);
-            return res.status(200).json({ success: false, error: 'Order not found' });
-          }
-
-          if (order.payment_status !== 'paid') {
-              const updateData = { payment_status: 'paid', updated_at: new Date().toISOString() };
-              if (MpesaReceiptNumber) {
-                updateData.mpesa_receipt_number = MpesaReceiptNumber;
-              }
-              await supabase.from('custom_bot_orders').update(updateData).eq('ref_code', refCode);
-              await sendCustomBotPaymentConfirmation(order); // Send confirmation email
-              console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot payment SUCCESS for existing DB order: ${refCode}`);
-          } else {
-              console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot order ${refCode} was already marked as paid. Ignoring duplicate callback.`);
-          }
-        }
-      } else {
-        // Payment failed
-        console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot payment FAILED for ref ${refCode}. ResultCode: ${ResultCode}, Desc: ${ResultDesc}`);
-        const failureReason = ResultDesc || 'Payment failed with an unknown error from the provider.';
-
-        // Use the new helper to move the failed order from Redis to the DB
-        await moveAndFailCustomBotOrderFromCache(refCode, failureReason);
+      if (customOrderError || !customOrder) {
+        console.error(`[${new Date().toISOString()}] PayHero CB: Custom bot order not found for ref_code ${serverSideReference}.`);
+        return res.status(200).json({ error: 'Order not found, callback acknowledged.' });
       }
-      // Respond to PayHero for custom bot flow
-      return res.status(200).json({ success: true, message: "Callback processed for custom bot order." });
+
+      if (customOrder.payment_status === 'paid' || customOrder.payment_status === 'failed') {
+        console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot order ${serverSideReference} already processed as ${customOrder.payment_status}. Ignoring duplicate.`);
+        return res.status(200).json({ message: 'Order already processed' });
+      }
+
+      let updatePayload = {
+        updated_at: new Date().toISOString(),
+        mpesa_receipt_number: MpesaReceiptNumber || null,
+        notes: ResultDesc || `PayHero status: ${paymentGatewayStatus}`
+      };
+
+      if (overallCallbackStatus === true && ResultCode === 0) {
+        updatePayload.payment_status = 'paid';
+        updatePayload.status = 'pending'; // The main status is still pending until the bot is made
+      } else {
+        updatePayload.payment_status = 'failed';
+        updatePayload.status = 'failed'; // Mark the whole order as failed
+      }
+
+      const { error: updateError } = await supabase
+        .from('custom_bot_orders')
+        .update(updatePayload)
+        .eq('ref_code', serverSideReference);
+
+      if (updateError) {
+        console.error(`[${new Date().toISOString()}] PayHero CB: DB update failed for custom bot order ${serverSideReference}:`, updateError.message);
+        throw updateError;
+      }
+
+      console.log(`[${new Date().toISOString()}] PayHero CB: Custom bot order ${serverSideReference} updated to payment_status: ${updatePayload.payment_status}`);
+
+      if (updatePayload.payment_status === 'paid') {
+          try {
+              await sendCustomBotPaymentConfirmation(customOrder);
+          } catch(emailError) {
+              console.error(`[${new Date().toISOString()}] PayHero CB: Failed to send payment confirmation email for custom bot order ${serverSideReference}:`, emailError.message);
+          }
+      }
 
     } else {
-      // --- STANDARD PRODUCT ORDER LOGIC (existing logic) ---
-      console.log(`[${new Date().toISOString()}] PayHero CB: Processing Standard Product Order for ref ${refCode}`);
-      const serverSideReference = refCode;
-
+      // --- Handle Standard Product Order Callback ---
       const { data: order, error: orderFetchError } = await supabase
         .from('orders')
         .select('*')
@@ -1605,41 +1607,30 @@ app.post('/api/payhero-callback', async (req, res) => {
         .eq('payment_method', 'payhero_server_stk')
         .single();
 
-      if (orderFetchError && orderFetchError.code !== 'PGRST116') {
-          console.error(`[${new Date().toISOString()}] PayHero CB: DB error fetching standard order ${serverSideReference}:`, orderFetchError.message);
-          throw orderFetchError;
-      }
-
-      if (!order) {
+      if (orderFetchError || !order) {
         console.error(`[${new Date().toISOString()}] PayHero CB: Standard order not found for ref_code ${serverSideReference}.`);
-        return res.status(200).json({ error: 'Order not found, callback acknowledged to prevent PayHero retries.' });
+        return res.status(200).json({ error: 'Order not found, callback acknowledged.' });
       }
 
-      if (order.status === 'confirmed_server_stk' || order.status === 'failed_amount_mismatch') {
-          console.log(`[${new Date().toISOString()}] PayHero CB: Standard order ${serverSideReference} already processed as ${order.status}. Ignoring duplicate callback.`);
-          return res.status(200).json({ message: `Order already processed as ${order.status}` });
+      if (order.status.startsWith('confirmed') || order.status.startsWith('failed')) {
+        console.log(`[${new Date().toISOString()}] PayHero CB: Standard order ${serverSideReference} already processed as ${order.status}. Ignoring duplicate.`);
+        return res.status(200).json({ message: `Order already processed` });
       }
 
       const mpesaReceiptIfAvailable = MpesaReceiptNumber || null;
       const notesForUpdate = ResultDesc || (paymentGatewayStatus !== "Success" ? `${paymentGatewayStatus} (Code: ${ResultCode})` : `Unknown PayHero Status (Code: ${ResultCode})`);
 
       let updatePayload = {
-          status: order.status,
-          notes: order.notes,
-          mpesa_receipt_number: order.mpesa_receipt_number,
-          payer_phone_number: order.payer_phone_number
+        notes: notesForUpdate,
+        mpesa_receipt_number: mpesaReceiptIfAvailable,
+        payer_phone_number: PayerPhone || null
       };
 
-      if (mpesaReceiptIfAvailable) updatePayload.mpesa_receipt_number = mpesaReceiptIfAvailable;
-      if (PayerPhone) updatePayload.payer_phone_number = PayerPhone;
-
-      if (overallCallbackStatus === true && ResultCode === 0 && paymentGatewayStatus === "Success") {
-        console.log(`[${new Date().toISOString()}] PayHero CB: Payment SUCCEEDED for standard order ${serverSideReference}.`);
+      if (overallCallbackStatus === true && ResultCode === 0) {
         const orderStoredKesAmount = Math.round(parseFloat(order.amount));
         const callbackReceivedKesAmount = Math.round(parseFloat(Amount));
 
         if (orderStoredKesAmount !== callbackReceivedKesAmount) {
-          console.warn(`[${new Date().toISOString()}] PayHero CB: Amount mismatch for standard order ${serverSideReference}. Order KES: ${orderStoredKesAmount}, CB KES: ${callbackReceivedKesAmount}.`);
           updatePayload.status = 'failed_amount_mismatch';
           updatePayload.notes = `Amount mismatch. Expected: ${orderStoredKesAmount}, Received: ${callbackReceivedKesAmount}. Original Note: ${notesForUpdate||''}`.trim();
         } else {
@@ -1647,40 +1638,25 @@ app.post('/api/payhero-callback', async (req, res) => {
           updatePayload.notes = `Payment confirmed successfully via PayHero STK. ${notesForUpdate || ''}`.trim();
         }
       } else {
-        console.log(`[${new Date().toISOString()}] PayHero CB: Payment FAILED for standard order ${serverSideReference}. ResultCode: ${ResultCode}, Desc: ${ResultDesc}`);
-        // Use a generic failure status per user feedback, as specific M-Pesa codes are not reliable via PayHero.
-        const failureStatus = 'failed_stk_push';
-        // The `notesForUpdate` variable already contains the `ResultDesc` from PayHero, which is the desired failure reason.
-        const failureNote = notesForUpdate || 'Payment failed. Please check your M-Pesa account and try again.';
-
-        updatePayload.status = failureStatus;
-        updatePayload.notes = failureNote.trim();
+        updatePayload.status = `failed_stk_cb_${ResultCode || 'unknown'}`;
       }
 
-      let dbUpdateError = null;
-      if (updatePayload.status !== order.status || updatePayload.notes !== order.notes || updatePayload.mpesa_receipt_number !== order.mpesa_receipt_number || updatePayload.payer_phone_number !== order.payer_phone_number) {
-          try {
-              const { error: updateError } = await supabase.from('orders').update(updatePayload).eq('ref_code', serverSideReference);
-              if (updateError) throw updateError;
-              console.log(`[${new Date().toISOString()}] PayHero CB: Standard order ${serverSideReference} updated to status: '${updatePayload.status}'.`);
-              if (updatePayload.status === 'confirmed_server_stk') {
-                  await sendOrderNotification(order.item, serverSideReference, order.amount);
-              }
-          } catch (supaError) {
-              dbUpdateError = supaError;
-              console.error(`[${new Date().toISOString()}] PayHero CB: DATABASE UPDATE FAILED for standard order ${serverSideReference}.`, supaError);
-          }
-      } else {
-          console.log(`[${new Date().toISOString()}] PayHero CB: No change needed for standard order ${serverSideReference}. DB update skipped.`);
+      const { error: updateError } = await supabase.from('orders').update(updatePayload).eq('ref_code', serverSideReference);
+
+      if (updateError) {
+        console.error(`[${new Date().toISOString()}] PayHero CB: DB update failed for standard order ${serverSideReference}:`, updateError.message);
+        throw updateError;
       }
 
-      if (dbUpdateError) {
-          console.error(`[${new Date().toISOString()}] PayHero CB: Critical - DB update failed for ${serverSideReference} but responding 200 to PayHero to prevent immediate retry.`);
-          return res.status(200).json({ success: false, message: "Callback acknowledged, but internal processing error occurred." });
-      } else {
-          return res.status(200).json({ success: true, message: "Callback processed for standard order." });
+      console.log(`[${new Date().toISOString()}] PayHero CB: Standard order ${serverSideReference} updated to status: ${updatePayload.status}`);
+
+      if (updatePayload.status === 'confirmed_server_stk') {
+        await sendOrderNotification(order.item, serverSideReference, order.amount);
       }
     }
+
+    res.status(200).json({ success: true, message: "Callback processed." });
+
   } catch (error) {
     console.error(`[${new Date().toISOString()}] PayHero CB: General error processing callback:`, error.message, error.stack);
     res.status(500).json({ error: 'Internal server error processing callback' });
@@ -2086,6 +2062,58 @@ app.get('/:slug', async (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));
 });
 
+// --- Admin Endpoints ---
+
+// Middleware to protect admin routes
+function isAdminAuthenticated(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const adminSecret = process.env.ADMIN_SECRET_KEY;
+
+  if (!adminSecret) {
+    console.error(`[${new Date().toISOString()}] ADMIN_SECRET_KEY is not set. Admin endpoints are disabled.`);
+    return res.status(500).json({ success: false, error: 'Server configuration error.' });
+  }
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: 'Unauthorized: Missing or malformed token.' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  if (token !== adminSecret) {
+    return res.status(403).json({ success: false, error: 'Forbidden: Invalid token.' });
+  }
+
+  next();
+}
+
+app.post('/api/admin/cleanup-orders', isAdminAuthenticated, async (req, res) => {
+  try {
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+
+    console.log(`[${new Date().toISOString()}] Admin cleanup: Deleting pending custom bot orders older than ${sixHoursAgo}`);
+
+    const { data, error, count } = await supabase
+      .from('custom_bot_orders')
+      .delete({ count: 'exact' }) // Important: asks Supabase to return the count
+      .eq('payment_status', 'pending')
+      .lt('created_at', sixHoursAgo);
+
+    if (error) {
+      console.error(`[${new Date().toISOString()}] Error cleaning up pending orders:`, error.message);
+      throw error;
+    }
+
+    const deletedCount = count || 0;
+    console.log(`[${new Date().toISOString()}] Admin cleanup successful. Deleted ${deletedCount} pending orders.`);
+
+    res.json({ success: true, message: `Cleanup successful. Deleted ${deletedCount} pending orders.` });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to cleanup pending orders.' });
+  }
+});
+
+
 // Custom Bot Order API Endpoints
 app.post('/api/custom-bot/create', rateLimit, async (req, res) => {
   try {
@@ -2102,66 +2130,37 @@ app.post('/api/custom-bot/create', rateLimit, async (req, res) => {
       refundMpesaName
     } = req.body;
 
-    // Validate required fields
+    // --- Validation ---
     if (!email || !botDescription || !botFeatures || !budget || !paymentMethod || !refundMethod) {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
-
-    // Validate budget minimum (changed from $50 to $30)
     if (budget < 30) {
       return res.status(400).json({ success: false, error: 'Minimum budget is $30' });
     }
-
-    // Validate text limits (300 characters each)
-    if (botDescription.length > 300) {
-      return res.status(400).json({ success: false, error: 'Bot description must be 300 characters or less' });
+    if (botDescription.length > 300 || botFeatures.length > 300) {
+      return res.status(400).json({ success: false, error: 'Description and features must be 300 characters or less' });
     }
-    
-    if (botFeatures.length > 300) {
-      return res.status(400).json({ success: false, error: 'Technical requirements must be 300 characters or less' });
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ success: false, error: 'Invalid email format' });
     }
-
-    // Validate refund details based on method
-    if (refundMethod === 'crypto') {
-      if (!refundCryptoWallet || !refundCryptoNetwork) {
-        return res.status(400).json({ success: false, error: 'Crypto wallet address and network are required for crypto refund method' });
-      }
-    } else if (refundMethod === 'mpesa') {
-      if (!refundMpesaNumber || !refundMpesaName) {
-        return res.status(400).json({ success: false, error: 'MPESA number and name are required for MPESA refund method' });
-      }
-      // Validate MPESA number format
-      const mpesaRegex = /^(\+254|254|07|01)\d{8,9}$/;
-      if (!mpesaRegex.test(refundMpesaNumber.trim())) {
-        return res.status(400).json({ success: false, error: 'Invalid MPESA number format' });
-      }
+    if (refundMethod === 'crypto' && (!refundCryptoWallet || !refundCryptoNetwork)) {
+      return res.status(400).json({ success: false, error: 'Crypto wallet details are required for crypto refund' });
+    } else if (refundMethod === 'mpesa' && (!refundMpesaNumber || !refundMpesaName)) {
+      return res.status(400).json({ success: false, error: 'MPESA details are required for MPESA refund' });
     }
 
-    // Generate reference code for caching
+    // --- Database-First Order Creation ---
     const refCode = `CB-${uuidv4()}`;
-
-    // Calculate KES amount for payment
+    const trackingNumber = `CB-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
     const exchangeRate = cachedData.settings?.fallbackRate || 130;
     const kesAmount = Math.round(budget * exchangeRate);
 
-    // Determine payment ID based on method
-    let paymentId = null;
-    if (paymentMethod === 'nowpayments') {
-      paymentId = `np-${refCode}`;
-    }
-
-    // Create order data for Redis caching (12-hour TTL)
-    const orderData = {
+    const dbOrderData = {
+      tracking_number: trackingNumber,
       client_email: email,
       bot_description: botDescription,
       bot_features: botFeatures,
-      budget_amount: budget,
+      budget_amount: parseFloat(budget),
       payment_method: paymentMethod,
       refund_method: refundMethod,
       refund_crypto_wallet: refundMethod === 'crypto' ? refundCryptoWallet : null,
@@ -2169,81 +2168,45 @@ app.post('/api/custom-bot/create', rateLimit, async (req, res) => {
       refund_mpesa_number: refundMethod === 'mpesa' ? refundMpesaNumber.trim() : null,
       refund_mpesa_name: refundMethod === 'mpesa' ? refundMpesaName.trim() : null,
       ref_code: refCode,
-      payment_id: paymentId,
-      status: 'pending_payment',
-      payment_status: 'pending',
-      created_at: new Date().toISOString()
+      status: 'pending',
+      payment_status: 'pending'
     };
 
-    // Cache order in Redis with 12-hour TTL (43200 seconds)
-    // Exception: For manual till, create order immediately in database for admin dashboard
-    if (paymentMethod === 'mpesa_manual') {
-      // Generate tracking number for manual till orders
-      const trackingNumber = `CB-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
-      
-      const dbOrderData = {
-        ...orderData,
-        tracking_number: trackingNumber,
-        status: 'pending',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
+    const { data: insertedOrder, error: insertError } = await supabase
+      .from('custom_bot_orders')
+      .insert([dbOrderData])
+      .select()
+      .single();
 
-      const { data: insertedOrder, error: insertError } = await supabase
-        .from('custom_bot_orders')
-        .insert([dbOrderData])
-        .select()
-        .single();
-
-      if (insertError) {
-        console.error(`[${new Date().toISOString()}] Error creating custom bot order:`, insertError);
-        return res.status(500).json({ success: false, error: 'Failed to create custom bot order' });
-      }
-
-      console.log(`[${new Date().toISOString()}] Manual till custom bot order created: ${trackingNumber} for ${email}`);
-
-      // Send notification email to admin (without tracking number for client yet)
-      try {
-        await sendCustomBotAdminNotification(insertedOrder);
-      } catch (emailError) {
-        console.error(`[${new Date().toISOString()}] Failed to send admin notification email:`, emailError.message);
-      }
-
-      return res.json({
-        success: true,
-        order: {
-          trackingNumber,
-          clientEmail: email,
-          refCode,
-          paymentMethod
-        },
-        kesAmount,
-        exchangeRate
-      });
-    } else {
-      // For other payment methods, cache in Redis
-      try {
-        await redisClient.set(`custom_bot_order:${refCode}`, JSON.stringify(orderData), { EX: 43200 });
-        console.log(`[${new Date().toISOString()}] Custom bot order cached in Redis: ${refCode} for ${email}`);
-      } catch (redisError) {
-        console.error(`[${new Date().toISOString()}] Error caching custom bot order in Redis:`, redisError);
-        return res.status(500).json({ success: false, error: 'Failed to cache custom bot order' });
-      }
-
-      return res.json({
-        success: true,
-        order: {
-          clientEmail: email,
-          refCode,
-          paymentMethod
-        },
-        kesAmount,
-        exchangeRate
-      });
+    if (insertError) {
+      console.error(`[${new Date().toISOString()}] Error creating custom bot order in DB:`, insertError);
+      return res.status(500).json({ success: false, error: 'Failed to create custom bot order' });
     }
 
+    console.log(`[${new Date().toISOString()}] Custom bot order created directly in DB: ${trackingNumber} for ${email}`);
+
+    // Send admin notification email
+    try {
+      await sendCustomBotAdminNotification(insertedOrder);
+    } catch (emailError) {
+      console.error(`[${new Date().toISOString()}] Failed to send admin notification email for new custom order:`, emailError.message);
+    }
+
+    // Return a consistent response for the frontend to proceed with payment
+    return res.json({
+      success: true,
+      order: {
+        trackingNumber: insertedOrder.tracking_number,
+        clientEmail: insertedOrder.client_email,
+        refCode: insertedOrder.ref_code,
+        paymentMethod: insertedOrder.payment_method
+      },
+      kesAmount,
+      exchangeRate
+    });
+
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error in custom bot creation:`, error.message);
+    console.error(`[${new Date().toISOString()}] Error in custom bot creation:`, error.message, error.stack);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
@@ -2555,10 +2518,15 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
 
-    // Get the custom bot order from Redis
-    const order = await redisClient.get(`custom_bot_order:${refCode}`);
-    if (!order) {
-      console.error(`[${new Date().toISOString()}] Custom Bot PayHero: Order not found in Redis for refCode: ${refCode}`);
+    // Get the custom bot order from the database
+    const { data: order, error: orderError } = await supabase
+      .from('custom_bot_orders')
+      .select('*')
+      .eq('ref_code', refCode)
+      .single();
+
+    if (orderError || !order) {
+      console.error(`[${new Date().toISOString()}] Custom Bot PayHero: Order not found in DB for refCode: ${refCode}`);
       return res.status(404).json({ success: false, error: 'Order not found or has expired. Please create the order again.' });
     }
 
@@ -2566,7 +2534,8 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
     const exchangeRate = cachedData.settings?.fallbackRate || 130;
     const expectedKesAmount = Math.round(order.budget_amount * exchangeRate);
     if (Math.round(amount) !== expectedKesAmount) {
-        console.warn(`[${new Date().toISOString()}] Custom Bot PayHero: Amount mismatch for ref ${refCode}. Expected ~${expectedKesAmount}, got ${amount}. Proceeding anyway.`);
+        console.warn(`[${new Date().toISOString()}] Custom Bot PayHero: Amount mismatch for ref ${refCode}. Expected ~${expectedKesAmount}, got ${amount}.`);
+        return res.status(400).json({ success: false, error: `Amount mismatch. Please try creating the order again.` });
     }
 
     // Normalize phone number
@@ -2577,7 +2546,7 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
     const payheroApiUrl = 'https://backend.payhero.co.ke/api/v2/payments';
     const payheroChannelId = cachedData.settings.payheroChannelId;
     const payheroAuthToken = cachedData.settings.payheroAuthToken;
-    const callbackUrl = `${getBaseUrl(req)}/api/payhero-callback`;
+    const callbackUrl = `${getBaseUrl(req)}/api/payhero-callback`; // Use unified callback
 
     if (!payheroAuthToken || !payheroChannelId) {
       console.error(`[${new Date().toISOString()}] Custom Bot PayHero: PayHero configuration missing.`);
@@ -2588,8 +2557,8 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
       amount: Math.round(amount),
       phone_number: normalizedPhone,
       channel_id: parseInt(payheroChannelId),
-      provider: "m-pesa",
-      external_reference: refCode,
+      provider: "m-pesa", // Use m-pesa provider
+      external_reference: refCode, // This is the CB- ref code
       customer_name: customerName,
       callback_url: callbackUrl
     };
@@ -2608,6 +2577,9 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
     if (payheroResponse.ok && (payheroData.status === 'success' || payheroData.status === 'QUEUED')) {
       console.log(`[${new Date().toISOString()}] PayHero STK push initiated for custom bot ${refCode}`);
       
+      // Update order status to pending_stk_push
+      await supabase.from('custom_bot_orders').update({ payment_status: 'pending_stk_push' }).eq('ref_code', refCode);
+
       res.json({
         success: true,
         message: 'STK Push initiated. Please check your phone.',
@@ -2616,6 +2588,8 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
       });
     } else {
       console.error(`[${new Date().toISOString()}] Custom Bot PayHero: payment initiation failed.`, payheroData);
+      // Update order status to failed
+      await supabase.from('custom_bot_orders').update({ payment_status: 'failed', notes: `PayHero initiation failed: ${payheroData.message}` }).eq('ref_code', refCode);
       throw new Error(payheroData.message || 'PayHero payment failed');
     }
 
@@ -2625,165 +2599,42 @@ app.post('/api/custom-bot/payhero-payment', rateLimit, async (req, res) => {
   }
 });
 
-// Custom Bot PayHero Callback (DELETED - Logic merged into /api/payhero-callback)
-
 // Custom Bot PayHero Status Check
 app.get('/api/custom-bot/payhero-status/:refCode', async (req, res) => {
   try {
     const { refCode } = req.params;
 
-    // Check Redis first for a pending order that hasn't hit the callback yet
-    const cachedOrder = await redisClient.get(`custom_bot_order:${refCode}`);
-    if (cachedOrder) {
-        // This is the "happy path" while waiting for the STK push.
-        return res.json({
-            success: true,
-            status: 'pending_stk_push', // A consistent status for the frontend
-            message: 'STK Push sent. Please check your phone and enter your M-PESA PIN to complete the payment.'
-        });
-    }
-
-    // If not in Redis, check the database for a confirmed or failed order
-    const { data: dbOrder, error: dbError } = await supabase
+    // Since we now create orders directly in the DB, we only need to query there.
+    const { data: order, error: dbError } = await supabase
         .from('custom_bot_orders')
-        .select('payment_status, tracking_number') // Select the fields we need
+        .select('payment_status, tracking_number, notes')
         .eq('ref_code', refCode)
         .single();
 
-    if (dbError && dbError.code !== 'PGRST116') {
-        console.error(`[${new Date().toISOString()}] DB error fetching custom bot payhero status for ${refCode}:`, dbError);
-        return res.status(500).json({ success: false, error: 'Database error.' });
+    if (dbError || !order) {
+        console.error(`[${new Date().toISOString()}] DB error fetching payhero status for ${refCode}:`, dbError);
+        return res.status(404).json({ success: false, status: 'not_found', message: 'Order not found. It may have expired or been cancelled.' });
     }
 
-    if (!dbOrder) {
-        return res.status(404).json({ success: false, status: 'expired', message: 'Order not found. It may have expired. Please try again.' });
-    }
-
-    // Construct a user-friendly message based on the DB status
-    let message = 'Checking status...';
-    const paymentStatus = dbOrder.payment_status;
-
-    if (paymentStatus === 'paid') {
-        message = 'Payment successful! Your custom bot order is being processed.';
-    } else if (paymentStatus && paymentStatus.startsWith('failed:')) {
-        // Extract the reason from "failed: The reason text"
-        const reason = paymentStatus.substring('failed:'.length).trim();
-        message = `Payment failed: ${reason}`;
-    } else if (paymentStatus === 'pending') {
-        message = 'Payment is pending verification.';
-    } else {
-        // Fallback for any other status (e.g., if it's just 'failed' without a reason)
-        message = `Order status: ${paymentStatus}`;
+    let userMessage = `Payment status: ${order.payment_status}`;
+    if (order.payment_status === 'paid') {
+        userMessage = 'Payment successful! Your order is being processed.';
+    } else if (order.payment_status === 'pending_stk_push') {
+        userMessage = 'STK Push sent. Please check your phone and enter your M-PESA PIN to complete the payment.';
+    } else if (order.payment_status === 'failed') {
+        userMessage = `Payment failed. Reason: ${order.notes || 'Please try again or contact support.'}`;
     }
 
     res.json({
         success: true,
-        status: dbOrder.payment_status, // Send the raw status for the frontend
-        trackingNumber: dbOrder.tracking_number,
-        message: message // Send the user-friendly message
+        status: order.payment_status,
+        trackingNumber: order.tracking_number,
+        message: userMessage
     });
 
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error in custom bot payhero-status check:`, error.message);
+    console.error(`[${new Date().toISOString()}] Error in payhero-status check:`, error.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-// Endpoint to delete a pending order from Redis if it times out
-app.delete('/api/custom-bot/order/:refCode', async (req, res) => {
-    try {
-        const { refCode } = req.params;
-        const result = await redisClient.del(`custom_bot_order:${refCode}`);
-        if (result > 0) {
-            console.log(`[${new Date().toISOString()}] Deleted pending custom bot order from Redis due to timeout: ${refCode}`);
-            res.json({ success: true, message: 'Pending order cancelled.' });
-        } else {
-            console.log(`[${new Date().toISOString()}] Attempted to delete timed-out order, but it was not found in Redis (already processed or expired): ${refCode}`);
-            res.status(404).json({ success: false, error: 'Pending order not found, it may have already been processed.' });
-        }
-    } catch (error) {
-        console.error(`[${new Date().toISOString()}] Error deleting pending order from Redis:`, error.message);
-        res.status(500).json({ success: false, error: 'Internal server error' });
-    }
-});
-
-// Custom Bot NOWPayments Integration
-app.post('/api/custom-bot/nowpayments-payment', rateLimit, async (req, res) => {
-  try {
-    const { refCode, amount, email, currency } = req.body;
-
-    if (!refCode || !amount || !email || !currency) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-
-    // Get the custom bot order from Redis
-    const order = await redisClient.get(`custom_bot_order:${refCode}`);
-    if (!order) {
-      console.error(`[${new Date().toISOString()}] Custom Bot NOWPayments: Order not found in Redis for refCode: ${refCode}`);
-      return res.status(404).json({ success: false, error: 'Order not found or has expired. Please create the order again.' });
-    }
-
-    // Verify amount (USD budget)
-    if (parseFloat(amount) !== order.budget_amount) {
-        console.warn(`[${new Date().toISOString()}] Custom Bot NOWPayments: Amount mismatch for ref ${refCode}. Expected ${order.budget_amount}, got ${amount}.`);
-        return res.status(400).json({ success: false, error: 'Price mismatch. Please create the order again.' });
-    }
-
-    const apiKey = process.env.NOWPAYMENTS_API_KEY;
-    if (!apiKey) {
-      console.error(`[${new Date().toISOString()}] Custom Bot NOWPayments: API key is not set.`);
-      return res.status(500).json({ success: false, error: 'Payment gateway configuration error.' });
-    }
-
-    const ipnCallbackUrl = `${getBaseUrl(req)}/api/custom-bot/nowpayments-callback`;
-
-    const nowPaymentsPayload = {
-      price_amount: parseFloat(amount),
-      price_currency: 'usd',
-      pay_currency: currency.toLowerCase(),
-      ipn_callback_url: ipnCallbackUrl,
-      order_id: refCode,
-      order_description: `Custom Bot Order - ${refCode}`,
-      is_fee_paid_by_user: false,
-      is_fixed_rate: true,
-      customer_email: email
-    };
-
-    const nowPaymentsResponse = await fetch('https://api.nowpayments.io/v1/payment', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey
-      },
-      body: JSON.stringify(nowPaymentsPayload)
-    });
-
-    const nowPaymentsData = await nowPaymentsResponse.json();
-
-    if (nowPaymentsResponse.ok && nowPaymentsData.payment_id) {
-      // Update the order in Redis with the payment_id from NOWPayments
-      order.payment_id = nowPaymentsData.payment_id;
-      await redisClient.set(`custom_bot_order:${refCode}`, JSON.stringify(order), { EX: 43200 }); // Reset TTL
-
-      console.log(`[${new Date().toISOString()}] NOWPayments payment created for custom bot ${refCode}: ${nowPaymentsData.payment_id}`);
-
-      res.json({
-        success: true,
-        orderId: refCode,
-        paymentId: nowPaymentsData.payment_id,
-        payAmount: nowPaymentsData.pay_amount,
-        payCurrency: nowPaymentsData.pay_currency,
-        payAddress: nowPaymentsData.pay_address,
-        clientEmail: order.client_email
-      });
-    } else {
-      console.error(`[${new Date().toISOString()}] Custom Bot NOWPayments: payment creation failed.`, nowPaymentsData);
-      throw new Error(nowPaymentsData.message || 'NOWPayments payment creation failed');
-    }
-
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Custom bot NOWPayments error:`, error.message);
-    res.status(500).json({ success: false, error: error.message || 'Payment processing failed' });
   }
 });
 
@@ -2871,225 +2722,6 @@ Admin Panel: ${getBaseUrl(req)}/virus.html
   }
 });
 
-// Custom Bot NOWPayments Status Check
-app.get('/api/custom-bot/nowpayments-status/:orderId', async (req, res) => {
-  try {
-    const { orderId } = req.params; // This is the refCode for the custom bot order
-    
-    // Check Redis first for a pending order, then check the database for a confirmed one.
-    let order = await redisClient.get(`custom_bot_order:${orderId}`);
-    const isFromCache = !!order;
-
-    if (!order) {
-      const { data: dbOrder, error: dbError } = await supabase
-        .from('custom_bot_orders')
-        .select('*')
-        .eq('ref_code', orderId)
-        .single();
-
-      if (dbError && dbError.code !== 'PGRST116') {
-        console.error(`[${new Date().toISOString()}] DB error fetching status for custom bot order ${orderId}:`, dbError);
-        return res.status(500).json({ success: false, error: 'Database error while checking order status.' });
-      }
-      order = dbOrder;
-    }
-
-    if (!order) {
-      console.log(`[${new Date().toISOString()}] Custom bot order status check: Order not found in cache or DB for refCode ${orderId}`);
-      return res.status(404).json({ success: false, error: 'Order not found' });
-    }
-
-    // If order is already completed, return success
-    if (order.payment_status === 'paid') {
-      return res.json({ 
-        success: true, 
-        payment_status: 'finished',
-        status: 'confirmed_nowpayments',
-        message: 'Payment successful! Your custom bot order is being processed.',
-        order: order
-      });
-    }
-
-    // If order doesn't have a NOWPayments payment ID, return current status
-    if (!order.payment_id) {
-      return res.json({
-        success: true,
-        payment_status: 'waiting',
-        status: 'pending_nowpayments',
-        message: 'Waiting for payment...'
-      });
-    }
-
-    // Check with NOWPayments API
-    const apiKey = process.env.NOWPAYMENTS_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ success: false, error: 'NOWPayments configuration missing' });
-    }
-
-    const statusResponse = await fetch(`https://api.nowpayments.io/v1/payment/${order.payment_id}`, {
-      headers: { 'x-api-key': apiKey }
-    });
-
-    if (!statusResponse.ok) {
-      return res.status(500).json({ success: false, error: 'Failed to check payment status' });
-    }
-
-    const statusData = await statusResponse.json();
-    
-    // Update our database if payment is confirmed
-    if (statusData.payment_status === 'finished' && order.payment_status !== 'paid') {
-      const { data: updatedOrder, error: updateError } = await supabase
-        .from('custom_bot_orders')
-        .update({ 
-          payment_status: 'paid',
-          amount_paid_crypto: statusData.actually_paid,
-          currency_paid: statusData.pay_currency,
-          updated_at: new Date().toISOString()
-        })
-        .eq('ref_code', orderId)
-        .select()
-        .single();
-
-      if (updateError) {
-        console.error(`[${new Date().toISOString()}] Error updating NOWPayments status in DB:`, updateError);
-        // Don't block the response, but log the error. The client will poll again.
-      } else {
-        // Send confirmation email
-        try {
-          await sendCustomBotPaymentConfirmation(updatedOrder || order);
-        } catch (emailError) {
-          console.error(`[${new Date().toISOString()}] Failed to send custom bot payment confirmation email:`, emailError.message);
-        }
-
-        // If the update was successful, we can return the final success response with the order details
-        return res.json({
-            success: true,
-            payment_status: 'finished',
-            status: 'confirmed_nowpayments',
-            message: 'Payment successful! Your custom bot order is being processed.',
-            order: updatedOrder // Return the full order object with the tracking number
-        });
-      }
-    }
-
-    // If we reach here, the payment is still pending or has failed.
-    let message = 'Waiting for payment confirmation...';
-    if (statusData.payment_status === 'finished') {
-      message = 'Payment successful! Your custom bot order is being processed.';
-    } else if (['failed', 'refunded', 'expired'].includes(statusData.payment_status)) {
-      message = `Payment ${statusData.payment_status}. Please contact support if needed.`;
-    }
-
-    res.json({
-      success: true,
-      payment_status: statusData.payment_status,
-      status: statusData.payment_status === 'finished' ? 'confirmed_nowpayments' : 'pending_nowpayments',
-      message: message,
-      order: order // Also include the order object in pending responses
-    });
-
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error checking custom bot NOWPayments status:`, error.message);
-    res.status(500).json({ success: false, error: 'Failed to check payment status' });
-  }
-});
-
-// Custom Bot NOWPayments Callback
-app.post('/api/custom-bot/nowpayments-callback', async (req, res) => {
-  try {
-    console.log(`[${new Date().toISOString()}] Custom bot NOWPayments callback received:`, JSON.stringify(req.body, null, 2));
-
-    const { order_id, payment_status, outcome_amount, outcome_currency } = req.body;
-
-    if (!order_id) {
-      return res.status(400).json({ success: false, error: 'Missing order ID' });
-    }
-
-    if (['finished', 'confirmed'].includes(payment_status)) {
-      // Try to move cached order to database first
-      const movedOrder = await moveCustomBotOrderFromCache(order_id);
-      
-      if (movedOrder) {
-        // Update with crypto payment details if provided
-        if (outcome_amount && outcome_currency) {
-          await supabase
-            .from('custom_bot_orders')
-            .update({ 
-              amount_paid_crypto: parseFloat(outcome_amount),
-              currency_paid: outcome_currency,
-              updated_at: new Date().toISOString()
-            })
-            .eq('ref_code', order_id);
-        }
-        
-        console.log(`[${new Date().toISOString()}] Custom bot NOWPayments payment success for cached order: ${order_id}`);
-        return res.json({ success: true });
-      }
-
-      // If not cached, check if order exists in database
-      const { data: order, error: orderError } = await supabase
-        .from('custom_bot_orders')
-        .select('*')
-        .eq('ref_code', order_id)
-        .single();
-
-      if (orderError || !order) {
-        console.error(`[${new Date().toISOString()}] Custom bot order not found for NOWPayments callback: ${order_id}`);
-        return res.status(404).json({ success: false, error: 'Order not found' });
-      }
-
-      // Update existing database order
-      const updateData = {
-        payment_status: 'paid',
-        updated_at: new Date().toISOString()
-      };
-
-      if (outcome_amount && outcome_currency) {
-        updateData.amount_paid_crypto = parseFloat(outcome_amount);
-        updateData.currency_paid = outcome_currency;
-      }
-
-      await supabase
-        .from('custom_bot_orders')
-        .update(updateData)
-        .eq('ref_code', order_id);
-
-      // Send payment confirmation email
-      try {
-        await sendCustomBotPaymentConfirmation(order);
-      } catch (emailError) {
-        console.error(`[${new Date().toISOString()}] Failed to send payment confirmation:`, emailError.message);
-      }
-    } else if (['failed', 'refunded', 'expired'].includes(payment_status)) {
-      // Handle failed payment for database orders only
-      const { data: order } = await supabase
-        .from('custom_bot_orders')
-        .select('*')
-        .eq('ref_code', order_id)
-        .single();
-
-      if (order) {
-        await supabase
-          .from('custom_bot_orders')
-          .update({
-            payment_status: 'failed',
-            status: 'failed', // Also update the main order status
-            updated_at: new Date().toISOString()
-          })
-          .eq('ref_code', order_id);
-      }
-      // For cached orders, we just let them expire from Redis
-    }
-
-    console.log(`[${new Date().toISOString()}] Custom bot NOWPayments payment ${payment_status} for ${order_id}`);
-    res.json({ success: true });
-
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Custom bot NOWPayments callback error:`, error.message);
-    res.status(500).json({ success: false, error: 'Callback processing failed' });
-  }
-});
-
 async function initialize() {
   console.log(`[${new Date().toISOString()}] Starting server initialization...`);
   
@@ -3126,53 +2758,6 @@ initialize().catch(error => {
   process.exit(1);
 });
 
-// Helper function to move a FAILED cached order from Redis to the database
-async function moveAndFailCustomBotOrderFromCache(refCode, failureReason) {
-  try {
-    const cachedOrderStr = await redisClient.get(`custom_bot_order:${refCode}`);
-    if (!cachedOrderStr) {
-      console.warn(`[${new Date().toISOString()}] No cached order found in Redis to fail for ref code: ${refCode}. It might have already been processed or expired.`);
-      return null;
-    }
-
-    const cachedOrder = JSON.parse(cachedOrderStr);
-
-    const trackingNumber = `CB-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
-
-    const dbOrderData = {
-      ...cachedOrder,
-      tracking_number: trackingNumber,
-      status: 'failed', // Main order status
-      payment_status: `failed: ${failureReason}`, // Detailed payment status
-      created_at: cachedOrder.created_at || new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    const { data: insertedOrder, error: insertError } = await supabase
-      .from('custom_bot_orders')
-      .insert([dbOrderData])
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error(`[${new Date().toISOString()}] Error moving FAILED cached order to database:`, insertError);
-      // Don't delete from Redis if DB insert fails, to allow for potential retry
-      return null;
-    }
-
-    // On successful insert, remove from Redis cache
-    await redisClient.del(`custom_bot_order:${refCode}`);
-    console.log(`[${new Date().toISOString()}] Moved FAILED cached order to database with tracking number: ${trackingNumber}`);
-
-    // Not sending a failure email to the user automatically to avoid spam. Admin can review.
-
-    return insertedOrder;
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error in moveAndFailCustomBotOrderFromCache:`, error.message);
-    return null;
-  }
-}
-
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log(`[${new Date().toISOString()}] 🌐 Server running on port ${PORT}`);
@@ -3186,66 +2771,3 @@ app.listen(PORT, async () => {
   }, 100);
 });
 
-// Helper function to move cached order from Redis to database with tracking number
-async function moveCustomBotOrderFromCache(refCode) {
-  try {
-    // Get cached order from Redis - it will be an object if it's a JSON string
-    const cachedOrder = await redisClient.get(`custom_bot_order:${refCode}`);
-    if (!cachedOrder) {
-      console.error(`[${new Date().toISOString()}] No cached order found in Redis for ref code: ${refCode}`);
-      return null;
-    }
-    
-    // Generate tracking number
-    const trackingNumber = `CB-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
-    
-    // Create database order with tracking number
-    const dbOrderData = {
-      ...cachedOrder,
-      tracking_number: trackingNumber,
-      status: 'pending',
-      payment_status: 'paid',
-      created_at: cachedOrder.created_at,
-      updated_at: new Date().toISOString()
-    };
-
-    const { data: insertedOrder, error: insertError } = await supabase
-      .from('custom_bot_orders')
-      .insert([dbOrderData])
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error(`[${new Date().toISOString()}] Error moving cached order to database:`, insertError);
-      return null;
-    }
-
-    // Remove from Redis cache
-    await redisClient.del(`custom_bot_order:${refCode}`);
-    
-    // Send confirmation emails with tracking number
-    try {
-      await sendCustomBotOrderConfirmation(
-        insertedOrder.client_email, 
-        insertedOrder.tracking_number, 
-        insertedOrder.bot_description, 
-        insertedOrder.budget_amount, 
-        insertedOrder.payment_method
-      );
-    } catch (emailError) {
-      console.error(`[${new Date().toISOString()}] Failed to send customer confirmation email:`, emailError.message);
-    }
-
-    try {
-      await sendCustomBotPaymentConfirmation(insertedOrder);
-    } catch (emailError) {
-      console.error(`[${new Date().toISOString()}] Failed to send payment confirmation email:`, emailError.message);
-    }
-
-    console.log(`[${new Date().toISOString()}] Moved cached order to database with tracking number: ${trackingNumber}`);
-    return insertedOrder;
-  } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error moving cached order to database:`, error);
-    return null;
-  }
-}
