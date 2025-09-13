@@ -2718,28 +2718,17 @@ function handleCustomBotNowPaymentsStatus(orderId) {
               }
             } else if (data.status && data.status.startsWith('failed_')) {
                 clearInterval(countdown);
-                statusMessage.innerHTML = `${data.message || `Payment failed: ${data.status}`}. You can <a href="${WHATSAPP_REDIRECT}" class="text-green-600 underline">contact support</a> if the issue persists.`;
+                // The `data.message` from the server now contains the descriptive error from PayHero.
+                // Display this reason clearly to the user.
+                statusMessage.innerHTML = `<strong>Payment Failed.</strong><br>${data.message || 'An unknown error occurred.'} You can <a href="${WHATSAPP_REDIRECT}" class="text-green-600 underline">contact support</a> if the issue persists.`;
 
-                // More specific retry logic for STK failures
-                const retryableStkFailures = ['failed_stk_timeout', 'failed_stk_initiation'];
-                // failed_stk_cb_ might also be retryable if it was a temporary PayHero issue
-                // but cancelled_by_user, insufficient_funds, invalid_pin are usually not directly retryable by simply re-polling.
-
-                if (showRetry && retryCount < maxRetries &&
-                    (retryableStkFailures.includes(data.status) || data.status.startsWith('failed_stk_cb_'))) {
-                    retryBtn.classList.remove('hidden');
-                    retryBtn.textContent = 'Retry Payment';
-                    retryBtn.onclick = () => {
-                        retryCount++;
-                        modal.classList.add('hidden'); document.body.classList.remove('popup-active');
-                        // For STK, retrying means showing the PayHero modal again.
-                        // We need product details and original KES price.
-                        const originalKesPrice = localStorage.getItem(`payment_${product.item}_kesPrice`) || (product.price * (exchangeRate || settings.fallbackRate || 130)).toFixed(2);
-                        showPayHeroModal(product, originalKesPrice);
-                    };
-                } else {
-                    setTimeout(() => { modal.classList.add('hidden'); document.body.classList.remove('popup-active'); clearPaymentCookie(product.item); }, 7000); // Longer for failure messages
-                }
+                // Since we removed specific failure statuses from the backend, the complex retry logic is no longer needed.
+                // We will simply close the modal after a delay to allow the user to read the message.
+                setTimeout(() => {
+                    modal.classList.add('hidden');
+                    document.body.classList.remove('popup-active');
+                    clearPaymentCookie(product.item);
+                }, 8000); // 8 seconds to read the message.
             } else if (data.status === 'no payment' || data.status === 'partial payment') { // Manual Mpesa specific
               clearInterval(countdown);
               statusMessage.innerHTML = `${data.message || 'There was an issue with your manual payment.'} Please <a href="${WHATSAPP_REDIRECT}" class="text-green-600 underline">contact support</a>.`;
