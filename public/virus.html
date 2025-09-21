@@ -1075,6 +1075,9 @@
           // No need for an additional global saveData() here as /api/add-bot already updated DB and server cache.
           renderBots();
           document.getElementById('product-form').reset();
+          const addPreview = document.getElementById('img-preview');
+          addPreview.src = '';
+          addPreview.classList.add('hidden');
           if (window.descQuill) {
             window.descQuill.setText(''); // Clear Quill editor
           }
@@ -1199,6 +1202,9 @@
     document.getElementById('edit-modal').classList.add('hidden');
     document.body.classList.remove('modal-active');
     document.getElementById('edit-form').reset();
+    const editPreview = document.getElementById('edit-img-preview');
+    editPreview.src = '';
+    editPreview.classList.add('hidden');
   }
 
   document.getElementById('edit-form').addEventListener('submit', async e => {
