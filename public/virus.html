@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Admin Panel - Deriv Bot Store</title>
   <link rel="icon" type="image/png" href="/favicon.png">
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
   <script defer src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
@@ -367,9 +366,9 @@
             </div>
             <div class="sm:col-span-2">
               <label for="img-file" class="block text-sm font-medium text-gray-700">Image</label>
-              <input type="file" id="img-file" accept="image/*" class="mt-1 w-full p-2 border rounded-md">
+              <input type="file" id="img-file" name="imageFile" accept="image/*" class="mt-1 w-full p-2 border rounded-md">
               <img id="img-preview" src="" alt="Image Preview" class="mt-2 w-32 h-32 object-cover rounded-md hidden">
-              <input type="hidden" id="img" required>
+              <input type="hidden" id="img" name="img">
             </div>
             <div class="sm:col-span-2">
               <label class="flex items-center">
@@ -779,9 +778,9 @@
             </div>
             <div class="sm:col-span-2">
               <label for="edit-img-file" class="block text-sm font-medium text-gray-700">Image</label>
-              <input type="file" id="edit-img-file" accept="image/*" class="mt-1 w-full p-2 border rounded-md">
-              <img id="edit-img-preview" src="" alt="Image Preview" class="mt-2 w-32 h-32 object-cover rounded-md hidden">
-              <input type="hidden" id="edit-img" required>
+              <input type="file" id="edit-img-file" name="imageFile" accept="image/*" class="mt-1 w-full p-2 border rounded-md">
+              <img id="edit-img-preview" src="" alt="Image Preview" class="mt-2 w-32 h-32 object-cover rounded-md">
+              <input type="hidden" id="edit-img" name="img">
             </div>
             <div class="sm:col-span-2">
               <label class="flex items-center">
@@ -804,52 +803,6 @@
   </div>
 
   <script>
-  const SUPABASE_URL = 'https://kiaratuwomaxqebxkacv.supabase.co';
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpYXJhdHV3b21heHFlYnhrYWN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDgyOTU2MjgsImV4cCI6MjA2Mzg3MTYyOH0.W4topF3UQBYKSHee9uXwLKQed9j4O84VNks5s4vy84M';
-  const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-  async function uploadImage(file) {
-    if (!file) return null;
-
-    const fileName = `${Date.now()}_${file.name}`;
-    const { data, error } = await supabaseClient.storage
-      .from('thumbnails')
-      .upload(fileName, file);
-
-    if (error) {
-      console.error('Error uploading image:', error);
-      alert('Error uploading image: ' + error.message);
-      return null;
-    }
-
-    const { data: { publicUrl } } = supabaseClient.storage
-      .from('thumbnails')
-      .getPublicUrl(fileName);
-
-    return publicUrl;
-  }
-
-  async function deleteImage(imageUrl) {
-    if (!imageUrl || !imageUrl.includes('supabase')) return;
-    try {
-      const url = new URL(imageUrl);
-      const pathSegments = url.pathname.split('/');
-      const fileName = pathSegments[pathSegments.length - 1];
-
-      if (!fileName) return;
-
-      const { error } = await supabaseClient.storage
-        .from('thumbnails')
-        .remove([fileName]);
-
-      if (error) {
-        console.error('Error deleting old image:', error);
-      }
-    } catch (e) {
-      console.error('Invalid image URL for deletion:', imageUrl, e);
-    }
-  }
-
   // Helper function to show button feedback
   function showButtonFeedback(btn, actionText, originalText, duration = 2000) {
     btn.disabled = true;
@@ -1068,27 +1021,17 @@
   // Add bot with progress bar
   document.getElementById('product-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const submitBtn = e.target.querySelector('button[type="submit"]');
-    const originalBtnText = submitBtn.textContent;
-    showButtonFeedback(submitBtn, 'Uploading...', 'Add Bot', 999999); // Long duration, will be reset manually
 
     const imageFile = document.getElementById('img-file').files[0];
-    let imageUrl = null;
-
-    if (imageFile) {
-      imageUrl = await uploadImage(imageFile);
-      if (!imageUrl) {
-        alert('Image upload failed. Please try again.');
-        submitBtn.disabled = false;
-        submitBtn.textContent = originalBtnText;
+    if (!imageFile) {
+        alert('Please select an image for the bot.');
         return;
-      }
-      document.getElementById('img').value = imageUrl;
-    } else {
-      alert('Please select an image for the bot.');
-      submitBtn.disabled = false;
-      submitBtn.textContent = originalBtnText;
-      return;
+    }
+
+    const botFile = document.getElementById('file').files[0];
+    if (!botFile) {
+        alert('Please select a bot file to upload.');
+        return;
     }
 
     const formData = new FormData();
@@ -1098,9 +1041,9 @@
     formData.append('desc', document.getElementById('desc').value);
     formData.append('embed', document.getElementById('embed').value.trim());
     formData.append('category', document.getElementById('category').value);
-    formData.append('img', document.getElementById('img').value.trim());
     formData.append('isNew', document.getElementById('isNew').checked);
-    formData.append('file', document.getElementById('file').files[0]);
+    formData.append('file', botFile);
+    formData.append('imageFile', imageFile);
 
     const progressBar = document.getElementById('upload-progress-bar');
     const progressContainer = document.getElementById('upload-progress');
@@ -1118,39 +1061,37 @@
     };
 
     xhr.onload = async () => {
-      submitBtn.disabled = false;
-      submitBtn.textContent = originalBtnText;
-
       if (xhr.status === 200) {
         const result = JSON.parse(xhr.responseText);
         if (result.success && result.product) {
+          // Server successfully added the bot and returned the new product data (reflecting DB state)
+          // Update client-side 'data.products' with the authoritative version from server
           const existingProductIndex = data.products.findIndex(p => p.item === result.product.item);
           if (existingProductIndex > -1) {
-            data.products[existingProductIndex] = result.product;
+            data.products[existingProductIndex] = result.product; // Update if somehow item number was reused (should not happen for new)
           } else {
             data.products.push(result.product);
           }
+          // No need for an additional global saveData() here as /api/add-bot already updated DB and server cache.
           renderBots();
           document.getElementById('product-form').reset();
-          document.getElementById('img-preview').classList.add('hidden');
           if (window.descQuill) {
-            window.descQuill.setText('');
+            window.descQuill.setText(''); // Clear Quill editor
           }
           progressContainer.classList.add('hidden');
           alert('Bot added successfully!');
         } else {
+          // Error from server after upload (e.g., DB insert issue not caught by server's orphan file cleanup)
           alert(`Failed to finalize bot addition: ${result.error || 'Unknown error'}`);
           progressContainer.classList.add('hidden');
         }
-      } else {
+      } else { // xhr.status !== 200
         alert(`Upload failed. Server responded with ${xhr.status}: ${xhr.statusText}`);
         progressContainer.classList.add('hidden');
       }
     };
 
     xhr.onerror = () => {
-      submitBtn.disabled = false;
-      submitBtn.textContent = originalBtnText;
       progressContainer.classList.add('hidden');
       alert('Error uploading bot. Please try again.');
     };
@@ -1193,13 +1134,6 @@
         window.editDescQuill.root.innerHTML = product.desc || '<p></p>';
         document.getElementById('edit-embed').value = product.embed || '';
         document.getElementById('edit-img').value = product.img;
-        const editImgPreview = document.getElementById('edit-img-preview');
-        if (product.img) {
-            editImgPreview.src = product.img;
-            editImgPreview.classList.remove('hidden');
-        } else {
-            editImgPreview.classList.add('hidden');
-        }
         document.getElementById('edit-isNew').checked = product.isNew;
         document.getElementById('edit-isArchived').checked = product.isArchived || false;
 
@@ -1273,91 +1207,51 @@
     const originalBtnText = btn.textContent;
     showButtonFeedback(btn, 'Saving...', 'Save Changes', 999999);
 
+    const formData = new FormData();
     const originalItem = document.getElementById('edit-item').dataset.originalItem;
     const newItem = document.getElementById('edit-item').value.trim();
 
-    if (newItem !== originalItem && data.products.some(p => p.item === newItem)) {
-      alert('This item number already exists. Please use a unique item number.');
-      btn.disabled = false; btn.textContent = originalBtnText;
-      return;
-    }
+    formData.append('originalItem', originalItem);
+    formData.append('item', newItem);
+    formData.append('name', document.getElementById('edit-name').value.trim());
+    formData.append('price', document.getElementById('edit-price').value);
+    formData.append('desc', document.getElementById('edit-desc').value);
+    formData.append('embed', document.getElementById('edit-embed').value.trim());
+    formData.append('category', document.getElementById('edit-category').value);
+    formData.append('isNew', document.getElementById('edit-isNew').checked);
+    formData.append('isArchived', document.getElementById('edit-isArchived').checked);
+    formData.append('discount_percentage', document.getElementById('edit-discount-percentage').value || '');
+    formData.append('discount_duration', document.getElementById('edit-discount-duration').value || '');
 
-    const productIndex = data.products.findIndex(p => p.item === originalItem);
-    if (productIndex === -1) {
-      alert('Original bot data not found. Please refresh.');
-      btn.disabled = false; btn.textContent = originalBtnText;
-      return;
-    }
-
-    const oldImageUrl = data.products[productIndex].img;
     const imageFile = document.getElementById('edit-img-file').files[0];
-    let newImageUrl = oldImageUrl;
-
     if (imageFile) {
-      const uploadedUrl = await uploadImage(imageFile);
-      if (!uploadedUrl) {
-        alert('New image upload failed. Please try again.');
-        btn.disabled = false; btn.textContent = originalBtnText;
-        return;
-      }
-      newImageUrl = uploadedUrl;
+      formData.append('imageFile', imageFile);
     }
 
-    document.getElementById('edit-img').value = newImageUrl;
+    try {
+      const response = await fetch('/api/update-bot', {
+        method: 'POST',
+        body: formData,
+        credentials: 'include'
+      });
 
-    const productPayload = {
-      fileId: data.products[productIndex].fileId,
-      originalFileName: data.products[productIndex].originalFileName,
-      item: newItem,
-      name: document.getElementById('edit-name').value.trim(),
-      price: parseFloat(document.getElementById('edit-price').value),
-      desc: document.getElementById('edit-desc').value,
-      embed: document.getElementById('edit-embed').value.trim(),
-      category: document.getElementById('edit-category').value,
-      img: newImageUrl,
-      isNew: document.getElementById('edit-isNew').checked,
-      isArchived: document.getElementById('edit-isArchived').checked,
-      discount_percentage: parseFloat(document.getElementById('edit-discount-percentage').value) || null,
-    };
+      const result = await response.json();
+      btn.disabled = false;
+      btn.textContent = originalBtnText;
 
-    const discountDuration = parseInt(document.getElementById('edit-discount-duration').value, 10);
-    if (discountDuration && discountDuration > 0) {
-      const now = new Date();
-      productPayload.discount_expires_at = new Date(now.getTime() + discountDuration * 60 * 60 * 1000).toISOString();
-    } else if (productPayload.discount_percentage === null || productPayload.discount_percentage <= 0) {
-      productPayload.discount_expires_at = null;
-    } else {
-      productPayload.discount_expires_at = data.products[productIndex].discount_expires_at;
-    }
-
-    if (newItem !== originalItem) {
-      productPayload.originalItem = originalItem;
-    }
-
-    // Update local cache before saving
-    if (newItem !== originalItem) {
-        data.products.splice(productIndex, 1);
-        data.products.push(productPayload);
-    } else {
-        data.products[productIndex] = productPayload;
-    }
-
-    const success = await saveData({ products: [productPayload] });
-    btn.disabled = false; btn.textContent = originalBtnText;
-
-    if (success) {
-      if (imageFile && newImageUrl !== oldImageUrl) {
-        await deleteImage(oldImageUrl);
-      }
-
-      await fetchData(); // Refresh data from server to be sure
-      renderBots();
-      closeEditModal();
-      alert('Bot updated successfully!');
-    } else {
-        // Revert local changes if save failed
-        await fetchData();
+      if (response.ok && result.success) {
+        await fetchData(); // Refresh all data from server
         renderBots();
+        closeEditModal();
+        alert('Bot updated successfully!');
+      } else {
+        throw new Error(result.error || 'Failed to update bot.');
+      }
+    } catch (error) {
+      console.error('Error updating bot:', error);
+      alert('Error updating bot: ' + error.message);
+      btn.disabled = false;
+      btn.textContent = originalBtnText;
     }
   });
 
